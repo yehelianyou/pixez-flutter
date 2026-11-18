@@ -1,0 +1,95 @@
+# 编译 PixEz 的 iOS 未签名 IPA（不需要 Mac）
+#
+# 用法：
+#   1. 在 GitHub 上 fork https://github.com/Notsfsssf/pixez-flutter
+#   2. 把本文件放到 fork 的 .github/workflows/build-ios.yml
+#   3. 仓库 → Actions → 「Build iOS IPA」→ Run workflow
+#      · ref 留空 = 编最新 master（对应 0.9.114 那一版）
+#      · ref 填 tag 或 commit = 编指定的旧版本（跑不起来时往回退）
+#   4. 跑完在 Artifacts 里下载 PixEz-ipa
+#
+# 产物是**未签名**的 Runner.ipa：
+#   · 爱思助手「IPA 签名」+ Apple ID → 安装（7 天有效）
+#   · 或 TrollStore 安装（iOS 14.0~15.4.1，永久有效）
+
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要编译的 git ref（留空=最新；可填 tag 如 0.9.100）'
+        required: false
+        default: ''
+      flutter_version:
+        description: 'Flutter 版本（留空=stable 最新）'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: 记录版本
+        run: |
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          node -e "const p=require('./pubspec.yaml');" 2>/dev/null || true
+          grep -m1 '^version:' pubspec.yaml || true
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter_version }}
+          cache: true
+
+      - name: 看环境
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: 拉依赖
+        run: flutter pub get
+
+      - name: 装 CocoaPods 依赖
+        working-directory: ios
+        run: |
+          if [ ! -f Podfile ]; then
+            cd .. && flutter build ios --config-only --no-codesign || true
+            cd ios
+          fi
+          pod install --repo-update
+
+      - name: 编译（不签名）
+        run: flutter build ios --release --no-codesign
+
+      - name: 打成 IPA
+        run: |
+          set -e
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then echo "没找到 $APP"; ls -R build/ios | head -60; exit 1; fi
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qr Runner.ipa Payload
+          ls -lh Runner.ipa
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist" > version.txt || true
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" > minos.txt || true
+          echo "--- 版本 ---"; cat version.txt minos.txt || true
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixEz-ipa-${{ env.commit }}
+          path: |
+            Runner.ipa
+            version.txt
+            minos.txt
+          retention-days: 30
